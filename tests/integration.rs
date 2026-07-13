@@ -1,14 +1,17 @@
 use std::path::PathBuf;
 
-use scip::types::{Document, Index};
+use scip::types::{Document, Index, SyntaxKind};
 use scip_python::{Options, index_project};
 
-fn index_fixture(name: &str) -> Index {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn fixture_root(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
-        .join(name);
+        .join(name)
+}
+
+fn index_fixture(name: &str) -> Index {
     let result = index_project(&Options {
-        project_root: root,
+        project_root: fixture_root(name),
         project_name: "testpkg".to_string(),
         project_version: "1.0".to_string(),
         infer: true,
@@ -16,6 +19,41 @@ fn index_fixture(name: &str) -> Index {
     .expect("indexing failed");
     assert!(result.errors.is_empty());
     result.index
+}
+
+/// Every occurrence on `line` as (source text, syntax kind) pairs, ordered
+/// by column. Reconstructing a whole line this way catches tokens that were
+/// dropped, duplicated or given the wrong range.
+fn highlighted_line(fixture: &str, doc: &Document, line: i32) -> Vec<(String, SyntaxKind)> {
+    let source = std::fs::read_to_string(fixture_root(fixture).join(&doc.relative_path))
+        .expect("cannot read fixture");
+    let text = source.lines().nth(line as usize).expect("no such line");
+    let mut tokens: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|o| o.range[0] == line && o.range.len() == 3)
+        .filter(|o| o.syntax_kind.value() != 0)
+        .map(|o| {
+            let (start, end) = (o.range[1] as usize, o.range[2] as usize);
+            let slice = text
+                .get(start..end)
+                .unwrap_or_else(|| panic!("range {start}..{end} outside line {line:?}"));
+            (
+                o.range[1],
+                slice.to_string(),
+                o.syntax_kind.enum_value_or_default(),
+            )
+        })
+        .collect();
+    tokens.sort_by_key(|(col, _, _)| *col);
+    tokens
+        .into_iter()
+        .map(|(_, text, kind)| (text, kind))
+        .collect()
+}
+
+fn kinds(pairs: &[(String, SyntaxKind)]) -> Vec<(&str, SyntaxKind)> {
+    pairs.iter().map(|(t, k)| (t.as_str(), *k)).collect()
 }
 
 fn doc<'a>(index: &'a Index, rel_path: &str) -> &'a Document {
@@ -185,6 +223,11 @@ fn all_symbols_parse() {
     let index = index_fixture("simple");
     for doc in &index.documents {
         for occurrence in &doc.occurrences {
+            // Syntax-only occurrences carry a highlighting kind and no symbol.
+            if occurrence.symbol.is_empty() {
+                assert_ne!(occurrence.syntax_kind.value(), 0);
+                continue;
+            }
             scip::symbol::parse_symbol(&occurrence.symbol)
                 .unwrap_or_else(|e| panic!("invalid symbol {:?}: {:?}", occurrence.symbol, e));
         }
@@ -206,6 +249,246 @@ fn definitions_have_symbol_information() {
             }
         }
     }
+}
+
+#[test]
+fn highlights_whole_function_signature() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    // def compute(items, *args, scale=1.0, **kwargs):
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 9)),
+        vec![
+            ("def", IdentifierKeyword),
+            ("compute", IdentifierFunctionDefinition),
+            ("(", PunctuationBracket),
+            ("items", IdentifierParameter),
+            (",", PunctuationDelimiter),
+            ("*", IdentifierOperator),
+            ("args", IdentifierParameter),
+            (",", PunctuationDelimiter),
+            ("scale", IdentifierParameter),
+            ("=", IdentifierOperator),
+            ("1.0", NumericLiteral),
+            (",", PunctuationDelimiter),
+            ("**", IdentifierOperator),
+            ("kwargs", IdentifierParameter),
+            (")", PunctuationBracket),
+            (":", PunctuationDelimiter),
+        ]
+    );
+}
+
+#[test]
+fn highlights_comments_and_literals() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 2)),
+        vec![("# A leading comment.", Comment)]
+    );
+    // TOTAL: int = 0
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 5)),
+        vec![
+            ("TOTAL", IdentifierMutableGlobal),
+            (":", PunctuationDelimiter),
+            ("int", IdentifierBuiltinType),
+            ("=", IdentifierOperator),
+            ("0", NumericLiteral),
+        ]
+    );
+}
+
+#[test]
+fn highlights_operators_and_keywords() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    // if (n := len(item)) > 2 and item is not None:
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 13)),
+        vec![
+            ("if", IdentifierKeyword),
+            ("(", PunctuationBracket),
+            ("n", IdentifierLocal),
+            (":=", IdentifierOperator),
+            ("len", IdentifierBuiltin),
+            ("(", PunctuationBracket),
+            ("item", IdentifierLocal),
+            (")", PunctuationBracket),
+            (")", PunctuationBracket),
+            (">", IdentifierOperator),
+            ("2", NumericLiteral),
+            ("and", IdentifierKeyword),
+            ("item", IdentifierLocal),
+            ("is", IdentifierKeyword),
+            ("not", IdentifierKeyword),
+            ("None", IdentifierNull),
+            (":", PunctuationDelimiter),
+        ]
+    );
+}
+
+#[test]
+fn highlights_fstring_parts() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    // return f"{total:>{scale}} of {os.path.sep!r}"
+    // The literal pieces stay strings; the interpolated names keep the
+    // kinds they resolved to, and the nested format spec is highlighted too.
+    let line = highlighted_line("syntax", doc, 21);
+    assert_eq!(
+        kinds(&line),
+        vec![
+            ("return", IdentifierKeyword),
+            ("f\"", StringLiteral),
+            ("{", PunctuationBracket),
+            ("total", IdentifierLocal),
+            (":", PunctuationDelimiter),
+            (">", StringLiteral),
+            ("{", PunctuationBracket),
+            ("scale", IdentifierParameter),
+            ("}", PunctuationBracket),
+            ("}", PunctuationBracket),
+            (" of ", StringLiteral),
+            ("{", PunctuationBracket),
+            ("os", IdentifierNamespace),
+            (".", PunctuationDelimiter),
+            ("path", IdentifierMutableGlobal),
+            (".", PunctuationDelimiter),
+            ("sep", Identifier),
+            ("!", IdentifierOperator),
+            ("r", Identifier),
+            ("}", PunctuationBracket),
+            ("\"", StringLiteral),
+        ]
+    );
+}
+
+#[test]
+fn soft_keywords_used_as_names() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    // `match` introduces a match statement here...
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 15)),
+        vec![
+            ("match", IdentifierKeyword),
+            ("total", IdentifierLocal),
+            (":", PunctuationDelimiter),
+        ]
+    );
+    // ...but is an ordinary name here, and so is `type`.
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 35)),
+        vec![
+            ("match", IdentifierMutableGlobal),
+            ("=", IdentifierOperator),
+            ("compute", IdentifierFunction),
+        ]
+    );
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 36)),
+        vec![
+            ("type", IdentifierMutableGlobal),
+            ("=", IdentifierOperator),
+            ("TOTAL", IdentifierMutableGlobal),
+        ]
+    );
+}
+
+#[test]
+fn highlights_class_and_async_method() {
+    use SyntaxKind::*;
+    let index = index_fixture("syntax");
+    let doc = doc(&index, "tokens.py");
+    // async def render(self) -> str:
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 27)),
+        vec![
+            ("async", IdentifierKeyword),
+            ("def", IdentifierKeyword),
+            ("render", IdentifierFunctionDefinition),
+            ("(", PunctuationBracket),
+            ("self", IdentifierParameter),
+            (")", PunctuationBracket),
+            ("->", IdentifierOperator),
+            ("str", IdentifierBuiltinType),
+            (":", PunctuationDelimiter),
+        ]
+    );
+    // self.kind resolves to the class attribute.
+    assert_eq!(
+        kinds(&highlighted_line("syntax", doc, 29)),
+        vec![
+            ("return", IdentifierKeyword),
+            ("self", IdentifierParameter),
+            (".", PunctuationDelimiter),
+            ("kind", IdentifierAttribute),
+        ]
+    );
+}
+
+/// A syntax kind must never cost a symbol: highlighting is layered onto the
+/// occurrences the semantic pass produced, never emitted alongside them.
+#[test]
+fn every_token_occurs_once() {
+    let index = index_fixture("syntax");
+    for doc in &index.documents {
+        let mut seen = std::collections::HashSet::new();
+        for occurrence in &doc.occurrences {
+            // The module definition is a zero-width marker at 0:0, not a token.
+            if occurrence.range == vec![0, 0, 0] {
+                continue;
+            }
+            assert!(
+                seen.insert(occurrence.range.clone()),
+                "two occurrences at {:?} in {}",
+                occurrence.range,
+                doc.relative_path
+            );
+        }
+    }
+}
+
+/// Cross-module references carry a syntax kind too, even though the symbol
+/// they resolve to is defined in another document.
+#[test]
+fn imported_symbols_are_highlighted() {
+    use SyntaxKind::*;
+    let index = index_fixture("simple");
+    let main = doc(&index, "main.py");
+    assert_eq!(
+        kinds(&highlighted_line("simple", main, 2)),
+        vec![
+            ("from", IdentifierKeyword),
+            ("pkg", IdentifierNamespace),
+            ("import", IdentifierKeyword),
+            ("Greeter", IdentifierType),
+            (",", PunctuationDelimiter),
+            ("helper", IdentifierFunction),
+        ]
+    );
+    // greeter.greet() only resolves through type inference; it must still
+    // end up as a single occurrence with both a symbol and a kind.
+    assert_eq!(
+        kinds(&highlighted_line("simple", main, 7)),
+        vec![
+            ("print", IdentifierBuiltin),
+            ("(", PunctuationBracket),
+            ("greeter", IdentifierLocal),
+            (".", PunctuationDelimiter),
+            ("greet", IdentifierFunction),
+            ("(", PunctuationBracket),
+            (")", PunctuationBracket),
+            (")", PunctuationBracket),
+        ]
+    );
 }
 
 #[test]

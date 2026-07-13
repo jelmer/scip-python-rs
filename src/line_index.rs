@@ -1,4 +1,4 @@
-use ruff_text_size::TextRange;
+use ruff_text_size::{TextRange, TextSize};
 
 /// Maps byte offsets in a source file to zero-based (line, column) pairs.
 /// Columns are UTF-8 byte offsets from the start of the line, matching
@@ -24,6 +24,17 @@ impl LineIndex {
             Err(next_line) => next_line - 1,
         };
         (line as u32, offset - self.line_starts[line])
+    }
+
+    /// The byte offset of a zero-based (line, column) pair, the inverse of
+    /// [`LineIndex::line_col`].
+    pub fn offset(&self, line: i32, col: i32) -> TextSize {
+        let start = self
+            .line_starts
+            .get(line as usize)
+            .copied()
+            .unwrap_or_default();
+        TextSize::from(start + col as u32)
     }
 
     /// A SCIP occurrence range: three elements when the range is on a
