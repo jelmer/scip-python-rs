@@ -16,21 +16,11 @@ ruff_db = { path = "vendor/ruff/crates/ruff_db", features = ["os"] }
 ruff_python_ast = { path = "vendor/ruff/crates/ruff_python_ast" }
 ruff_python_parser = { path = "vendor/ruff/crates/ruff_python_parser" }
 ruff_text_size = { path = "vendor/ruff/crates/ruff_text_size" }
-# Matches the salsa dependency of the vendored workspace; the versions
-# must stay in sync so the salsa database types line up.
-salsa = { version = "0.27.2", default-features = false, features = [
-    "compact_str",
-    "macros",
-    "salsa_unstable",
-    "inventory",
-] }
 scip = "0.9.0"
 toml = "1.1.2"
 ty_module_resolver = { path = "vendor/ruff/crates/ty_module_resolver" }
-ty_python_core = { path = "vendor/ruff/crates/ty_python_core" }
+ty_project = { version = "0.0.0", path = "vendor/ruff/crates/ty_project" }
 ty_python_semantic = { path = "vendor/ruff/crates/ty_python_semantic" }
-ty_site_packages = { path = "vendor/ruff/crates/ty_site_packages" }
-ty_vendored = { path = "vendor/ruff/crates/ty_vendored" }
 walkdir = "2.5.0"
 
 [features]

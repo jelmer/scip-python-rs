@@ -102,6 +102,16 @@ impl ProjectContext {
         )
     }
 
+    /// A symbol for a definition addressed by module plus descriptor path,
+    /// as synthesized for definitions outside the project.
+    pub fn symbol_with_descriptors(&self, module: &str, path: &[(String, Suffix)]) -> String {
+        let mut descriptors = vec![descriptor(module, Suffix::Namespace)];
+        for (name, suffix) in path {
+            descriptors.push(descriptor(name, *suffix));
+        }
+        format_global(&self.module_package(module), descriptors)
+    }
+
     /// Resolve `module.name` to a binding: a submodule, an exported
     /// definition, or (as a fallback) a synthesized term under the module.
     pub fn resolve_member(&self, module: &str, name: &str, depth: u8) -> Binding {
@@ -518,7 +528,7 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
         let inference = Inference::new(&root)?;
         for (module, result) in parsed.iter().zip(&mut indexed) {
             let references =
-                inference.attribute_references(&root.join(&module.rel_path), &result.occupied)?;
+                inference.references(&root.join(&module.rel_path), &result.occupied)?;
             if references.is_empty() {
                 continue;
             }
@@ -536,11 +546,11 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
                         }
                         Some(symbol.clone())
                     }
-                    ResolvedTarget::Module(path) => {
-                        let rel = path.strip_prefix(&root).ok()?;
-                        let (target_module, _) = module_name(rel);
-                        Some(context.module_symbol(&target_module))
-                    }
+                    ResolvedTarget::Module(name) => Some(context.module_symbol(name)),
+                    ResolvedTarget::External {
+                        module,
+                        descriptors,
+                    } => Some(context.symbol_with_descriptors(module, descriptors)),
                 });
                 if let Some(symbol) = symbol {
                     let range = lines.range_vec(reference.range);
