@@ -134,7 +134,7 @@ fn cross_module_references() {
     // External imports fall back to a synthesized package.
     assert_eq!(
         occurrences(main, "scip-python python os unknown os/"),
-        vec![(vec![0, 7, 9], 0)]
+        vec![(vec![0, 7, 9], 0), (vec![11, 7, 9], 0)]
     );
 }
 
@@ -177,6 +177,34 @@ fn inferred_method_call() {
             "scip-python python testpkg 1.0 `pkg.util`/Greeter#greet()."
         ),
         vec![(vec![7, 18, 23], 0)]
+    );
+}
+
+#[test]
+fn inferred_builtin_name() {
+    let index = index_fixture("simple");
+    let main = doc(&index, "main.py");
+    // print has no syntactic binding; ty resolves it into typeshed.
+    assert_eq!(
+        occurrences(
+            main,
+            "scip-python python builtins unknown builtins/print()."
+        ),
+        vec![(vec![7, 4, 9], 0)]
+    );
+}
+
+#[test]
+fn inferred_external_method() {
+    let index = index_fixture("simple");
+    let main = doc(&index, "main.py");
+    // A method on an inferred str, synthesized from typeshed's AST.
+    assert_eq!(
+        occurrences(
+            main,
+            "scip-python python builtins unknown builtins/str#upper()."
+        ),
+        vec![(vec![12, 24, 29], 0)]
     );
 }
 

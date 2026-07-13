@@ -6,12 +6,15 @@ Rust on top of ruff's
 
 Name resolution happens in two stages. A syntactic pass does scope-based
 resolution of everything that doesn't need types: definitions, imports,
-locals, `self` attributes. A second pass then resolves the remaining
-attribute references (`obj.method()` and the like) through
-[ty](https://github.com/astral-sh/ty)'s type inference engine
-(`ty_python_semantic`). The inference pass can be disabled with
-`--no-infer`, which makes indexing roughly an order of magnitude faster at
-the cost of losing type-dependent references.
+locals, `self` attributes. A second pass resolves everything the first
+could not through [ty](https://github.com/astral-sh/ty)'s type inference
+engine: attribute references on inferred types (`obj.method()` and the
+like), and names without a syntactic binding such as builtins. References
+into code outside the project (typeshed, installed packages -- ty discovers
+the Python environment via the project configuration) get symbols
+synthesized from their position in the defining module. The inference pass
+can be disabled with `--no-infer`, which makes indexing several times
+faster at the cost of losing type-dependent references.
 
 ## Usage
 
