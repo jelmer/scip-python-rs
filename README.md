@@ -43,13 +43,29 @@ Files under directories named `venv`, `node_modules`, `build`, `dist`,
 `__pycache__`, `*.egg-info` or starting with a dot are skipped. A top-level
 `src/` directory is treated as a source root rather than a package.
 
+## Syntax highlighting
+
+Every token gets a `syntax_kind`, so a client can highlight a file from the
+index alone without re-parsing it: keywords, comments, string and numeric
+literals, operators and brackets, plus the more specific identifier kinds --
+a name is emitted as a function, type, parameter, attribute, module, local or
+builtin according to what it resolved to.
+
+Highlighting reuses the token stream from the parse the indexer already does,
+and attaches kinds to the occurrences the semantic pass produced rather than
+emitting a second occurrence per token, so each token appears exactly once. On
+the Python 3.13 standard library this grows the index by about 1.4x.
+
 ## Limitations
 
-- no type inference: `obj.method()` only resolves when `obj` is a module
-  or `self`
+- with `--no-infer`, `obj.method()` only resolves when `obj` is a module or
+  `self`
 - star re-exports (`from x import *` in `__init__.py`) are not expanded
   into the export table
 - PEP 695 type parameters are not yet bound
+- names that resolve to nothing are highlighted as plain identifiers, so
+  references into the standard library and other uninstalled packages are
+  only recognised as builtins by name
 - files that fail to parse are reported on stderr and skipped
 
 ## Development

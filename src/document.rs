@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{
     Comprehension, ExceptHandler, Expr, ExprAttribute, ExprLambda, InterpolatedStringElement,
     Parameter, Parameters, Pattern, Stmt, StmtClassDef, StmtFunctionDef, StmtImport,
@@ -9,12 +10,13 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 use scip::types::descriptor::Suffix;
 use scip::types::symbol_information::Kind;
 use scip::types::{
-    Descriptor, Document, Occurrence, PositionEncoding, SymbolInformation, SymbolRole,
+    Descriptor, Document, Occurrence, PositionEncoding, SymbolInformation, SymbolRole, SyntaxKind,
 };
 
 use crate::line_index::LineIndex;
 use crate::project::{Binding, BindingKind, ProjectContext, resolve_import_base};
-use crate::symbols::{descriptor, format_global, local_symbol};
+use crate::symbols::{descriptor, format_global, local_symbol, syntax_kind_for};
+use crate::syntax::{is_emittable, token_kind, unresolved_name_kind};
 
 enum ScopeType {
     Module,
@@ -53,6 +55,9 @@ pub struct DocIndexer<'a> {
     definitions: Vec<(u32, String)>,
     occupied: HashSet<u32>,
     documented: HashSet<String>,
+    /// What each symbol defined in this document is, so that references to
+    /// it can be highlighted as a function, type, parameter and so on.
+    kinds: HashMap<String, Kind>,
 }
 
 impl<'a> DocIndexer<'a> {
@@ -81,10 +86,11 @@ impl<'a> DocIndexer<'a> {
             definitions: vec![],
             occupied: HashSet::new(),
             documented: HashSet::new(),
+            kinds: HashMap::new(),
         }
     }
 
-    pub fn index(mut self, body: &[Stmt]) -> IndexedDocument {
+    pub fn index(mut self, body: &[Stmt], tokens: &Tokens) -> IndexedDocument {
         let module_symbol = self.context.module_symbol(self.module);
         self.doc.occurrences.push(Occurrence {
             range: vec![0, 0, 0],
@@ -100,11 +106,70 @@ impl<'a> DocIndexer<'a> {
         });
         self.pre_bind(body);
         self.visit_stmts(body);
+        self.highlight(tokens);
         self.doc.occurrences.sort_by(|a, b| a.range.cmp(&b.range));
         IndexedDocument {
             document: self.doc,
             definitions: self.definitions,
             occupied: self.occupied,
+        }
+    }
+
+    /// Attach syntax kinds for highlighting. Tokens that the semantic pass
+    /// already emitted an occurrence for have their kind set on that
+    /// occurrence; everything else -- keywords, comments, literals,
+    /// punctuation, and names that did not resolve -- gets a new occurrence
+    /// carrying only a range and a syntax kind.
+    fn highlight(&mut self, tokens: &Tokens) {
+        // The module-level occurrence is a zero-width marker at 0:0 rather
+        // than a real token, so it must not pick up a syntax kind.
+        let mut by_start: HashMap<u32, usize> = HashMap::new();
+        for (i, occurrence) in self.doc.occurrences.iter().enumerate().skip(1) {
+            let start = u32::from(self.lines.offset(occurrence.range[0], occurrence.range[1]));
+            by_start.insert(start, i);
+        }
+
+        let mut added = vec![];
+        for token in tokens.iter() {
+            if !is_emittable(token) {
+                continue;
+            }
+            let start: u32 = token.range().start().into();
+            match by_start.get(&start) {
+                Some(&i) => {
+                    let occurrence = &self.doc.occurrences[i];
+                    let is_definition =
+                        occurrence.symbol_roles & SymbolRole::Definition as i32 != 0;
+                    let kind = self.resolved_kind(&occurrence.symbol, is_definition);
+                    self.doc.occurrences[i].syntax_kind = kind.into();
+                }
+                None => {
+                    let kind = match token.kind() {
+                        TokenKind::Name => unresolved_name_kind(&self.source[token.range()]),
+                        other => match token_kind(other) {
+                            Some(kind) => kind,
+                            None => continue,
+                        },
+                    };
+                    added.push(Occurrence {
+                        range: self.lines.range_vec(token.range()),
+                        syntax_kind: kind.into(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        self.doc.occurrences.extend(added);
+    }
+
+    /// The syntax kind for an identifier the indexer resolved to `symbol`.
+    fn resolved_kind(&self, symbol: &str, is_definition: bool) -> SyntaxKind {
+        // `Kind::Variable` covers locals, globals and attributes alike, so
+        // it says less than the symbol itself does. Fall through to the
+        // symbol for those.
+        match self.kinds.get(symbol) {
+            Some(Kind::Variable) | None => kind_from_suffix(symbol, is_definition),
+            Some(kind) => syntax_kind_for(*kind, is_definition),
         }
     }
 
@@ -134,6 +199,7 @@ impl<'a> DocIndexer<'a> {
     }
 
     fn symbol_info(&mut self, symbol: &str, kind: Kind, display_name: &str, docs: Option<String>) {
+        self.kinds.insert(symbol.to_string(), kind);
         if self.documented.insert(symbol.to_string()) {
             self.doc.symbols.push(SymbolInformation {
                 symbol: symbol.to_string(),
@@ -1044,6 +1110,37 @@ impl<'a> DocIndexer<'a> {
                 }
             }
         }
+    }
+}
+
+/// Recover what a symbol refers to from the trailing descriptor of its
+/// symbol string, for symbols defined in another document. The SCIP symbol
+/// grammar spells the suffix out: `#` for a type, `().` for a method,
+/// `(name)` for a parameter, `/` for a namespace, `.` for a term.
+pub fn kind_from_suffix(symbol: &str, is_definition: bool) -> SyntaxKind {
+    if symbol.starts_with("local ") {
+        SyntaxKind::IdentifierLocal
+    } else if symbol.ends_with('#') {
+        SyntaxKind::IdentifierType
+    } else if symbol.ends_with("().") {
+        if is_definition {
+            SyntaxKind::IdentifierFunctionDefinition
+        } else {
+            SyntaxKind::IdentifierFunction
+        }
+    } else if symbol.ends_with(')') {
+        SyntaxKind::IdentifierParameter
+    } else if symbol.ends_with('/') {
+        SyntaxKind::IdentifierModule
+    } else if symbol.ends_with('.') {
+        // A term. Inside a type it is an attribute, otherwise a global.
+        if symbol.contains('#') {
+            SyntaxKind::IdentifierAttribute
+        } else {
+            SyntaxKind::IdentifierMutableGlobal
+        }
+    } else {
+        SyntaxKind::Identifier
     }
 }
 

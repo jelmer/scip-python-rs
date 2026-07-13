@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use ruff_python_ast::{Expr, Stmt};
-use ruff_python_parser::parse_module;
+use ruff_python_ast::{Expr, ModModule, Stmt};
+use ruff_python_parser::{Parsed, parse_module};
 use scip::types::descriptor::Suffix;
 use scip::types::{Index, Metadata, ProtocolVersion, TextEncoding, ToolInfo};
 use walkdir::WalkDir;
 
-use crate::document::DocIndexer;
+use crate::document::{DocIndexer, kind_from_suffix};
 use crate::infer::{Inference, ResolvedTarget};
 use crate::line_index::LineIndex;
 use crate::symbols::{PackageInfo, descriptor, format_global};
@@ -192,7 +192,13 @@ struct ParsedModule {
     module: String,
     is_package: bool,
     source: String,
-    body: Vec<Stmt>,
+    parsed: Parsed<ModModule>,
+}
+
+impl ParsedModule {
+    fn body(&self) -> &[Stmt] {
+        &self.parsed.syntax().body
+    }
 }
 
 const SKIP_DIRS: &[&str] = &["__pycache__", "venv", "node_modules", "build", "dist"];
@@ -426,7 +432,7 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
                     module,
                     is_package,
                     source,
-                    body: module_ast.into_syntax().body.into_iter().collect(),
+                    parsed: module_ast,
                 });
             }
             Err(err) => {
@@ -452,7 +458,7 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
         collect_exports(
             module_dotted,
             module.is_package,
-            &module.body,
+            module.body(),
             |name, suffix| {
                 format_global(
                     package_ref,
@@ -501,7 +507,7 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
             module.is_package,
             &context,
         );
-        let result = indexer.index(&module.body);
+        let result = indexer.index(module.body(), module.parsed.tokens());
         for (start, symbol) in &result.definitions {
             def_table.insert((module.rel_path.clone(), *start), symbol.clone());
         }
@@ -537,16 +543,37 @@ pub fn index_project(options: &Options) -> Result<IndexResult> {
                     }
                 });
                 if let Some(symbol) = symbol {
-                    result.document.occurrences.push(scip::types::Occurrence {
-                        range: lines.range_vec(reference.range),
-                        symbol,
-                        symbol_roles: if reference.is_store {
-                            scip::types::SymbolRole::WriteAccess as i32
-                        } else {
-                            0
-                        },
-                        ..Default::default()
-                    });
+                    let range = lines.range_vec(reference.range);
+                    let roles = if reference.is_store {
+                        scip::types::SymbolRole::WriteAccess as i32
+                    } else {
+                        0
+                    };
+                    let syntax_kind = kind_from_suffix(&symbol, false);
+                    // The syntactic pass already emitted a syntax-only
+                    // occurrence for this token, since it could not resolve
+                    // it to a symbol. Attach the symbol to it, and refine
+                    // its kind now that we know what it refers to, rather
+                    // than emitting a second occurrence over the same range.
+                    match result
+                        .document
+                        .occurrences
+                        .iter_mut()
+                        .find(|o| o.symbol.is_empty() && o.range == range)
+                    {
+                        Some(occurrence) => {
+                            occurrence.symbol = symbol;
+                            occurrence.symbol_roles = roles;
+                            occurrence.syntax_kind = syntax_kind.into();
+                        }
+                        None => result.document.occurrences.push(scip::types::Occurrence {
+                            range,
+                            symbol,
+                            symbol_roles: roles,
+                            syntax_kind: syntax_kind.into(),
+                            ..Default::default()
+                        }),
+                    }
                 }
             }
             result

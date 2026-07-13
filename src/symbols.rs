@@ -1,7 +1,8 @@
 use protobuf::MessageField;
 use scip::symbol::format_symbol;
 use scip::types::descriptor::Suffix;
-use scip::types::{Descriptor, Package, Symbol};
+use scip::types::symbol_information::Kind;
+use scip::types::{Descriptor, Package, Symbol, SyntaxKind};
 
 #[derive(Clone, Debug)]
 pub struct PackageInfo {
@@ -35,6 +36,33 @@ pub fn format_global(package: &PackageInfo, descriptors: Vec<Descriptor>) -> Str
 
 pub fn local_symbol(id: usize) -> String {
     format!("local {id}")
+}
+
+/// The syntax kind to highlight an identifier with, given what the indexer
+/// resolved it to. Definitions get the more specific "definition" kinds
+/// where SCIP has one.
+pub fn syntax_kind_for(kind: Kind, is_definition: bool) -> SyntaxKind {
+    match kind {
+        Kind::Module | Kind::Namespace | Kind::Package => SyntaxKind::IdentifierModule,
+        Kind::Class
+        | Kind::Interface
+        | Kind::Enum
+        | Kind::Struct
+        | Kind::Trait
+        | Kind::TypeAlias => SyntaxKind::IdentifierType,
+        Kind::Function | Kind::Method | Kind::StaticMethod | Kind::Constructor => {
+            if is_definition {
+                SyntaxKind::IdentifierFunctionDefinition
+            } else {
+                SyntaxKind::IdentifierFunction
+            }
+        }
+        Kind::Parameter | Kind::SelfParameter | Kind::TypeParameter => {
+            SyntaxKind::IdentifierParameter
+        }
+        Kind::Field | Kind::Property | Kind::EnumMember => SyntaxKind::IdentifierAttribute,
+        _ => SyntaxKind::Identifier,
+    }
 }
 
 #[cfg(test)]
