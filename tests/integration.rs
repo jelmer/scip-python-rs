@@ -388,7 +388,9 @@ fn highlights_fstring_parts() {
             (".", PunctuationDelimiter),
             ("path", IdentifierMutableGlobal),
             (".", PunctuationDelimiter),
-            ("sep", Identifier),
+            // Resolves into posixpath, so it is a global rather than an
+            // unresolved plain identifier.
+            ("sep", IdentifierMutableGlobal),
             ("!", IdentifierOperator),
             ("r", Identifier),
             ("}", PunctuationBracket),
