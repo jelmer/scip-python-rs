@@ -42,6 +42,11 @@ Sourcegraph or consumed by any other SCIP tooling.
 - references to external modules, using a synthesized package with version
   `unknown`
 
+Besides `.py` and `.pyi` files, extension-less files whose first line is a
+Python shebang (`#!/usr/bin/env python3`, `#!/usr/bin/python3.12`, pypy too)
+are indexed as scripts, under a module name taken from the file name. Files
+carrying some other extension are not sniffed.
+
 Files under directories named `venv`, `node_modules`, `build`, `dist`,
 `__pycache__`, `*.egg-info` or starting with a dot are skipped. A top-level
 `src/` directory is treated as a source root rather than a package.
