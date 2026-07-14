@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""An extension-less script, detected by its shebang."""
+
+from helper import greet
+
+
+def main() -> None:
+    print(greet("world"))
+
+
+if __name__ == "__main__":
+    main()

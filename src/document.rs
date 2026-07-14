@@ -1113,11 +1113,28 @@ impl<'a> DocIndexer<'a> {
     }
 }
 
+/// The symbol prefix shared by everything defined in the `builtins` module.
+/// Names resolving into it get the builtin-specific syntax kinds rather than
+/// the generic ones a symbol suffix alone implies.
+const BUILTINS_PREFIX: &str = "scip-python python builtins ";
+
 /// Recover what a symbol refers to from the trailing descriptor of its
 /// symbol string, for symbols defined in another document. The SCIP symbol
 /// grammar spells the suffix out: `#` for a type, `().` for a method,
 /// `(name)` for a parameter, `/` for a namespace, `.` for a term.
 pub fn kind_from_suffix(symbol: &str, is_definition: bool) -> SyntaxKind {
+    // Builtins are worth distinguishing from ordinary types and functions,
+    // and inference resolves them like anything else, so the suffix alone
+    // does not say that `int` is a builtin type and `print` a builtin
+    // function. A definition is never a builtin: that would be typeshed's
+    // own source, which the indexer does not emit documents for.
+    if !is_definition && symbol.starts_with(BUILTINS_PREFIX) {
+        if symbol.ends_with('#') {
+            return SyntaxKind::IdentifierBuiltinType;
+        } else if symbol.ends_with("().") {
+            return SyntaxKind::IdentifierBuiltin;
+        }
+    }
     if symbol.starts_with("local ") {
         SyntaxKind::IdentifierLocal
     } else if symbol.ends_with('#') {
@@ -1171,4 +1188,44 @@ fn docstring(body: &[Stmt]) -> Option<String> {
         return Some(s.value.to_str().to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_kinds() {
+        assert_eq!(
+            kind_from_suffix("scip-python python builtins unknown builtins/int#", false),
+            SyntaxKind::IdentifierBuiltinType
+        );
+        assert_eq!(
+            kind_from_suffix(
+                "scip-python python builtins unknown builtins/print().",
+                false
+            ),
+            SyntaxKind::IdentifierBuiltin
+        );
+        // Project types and functions keep the generic kinds.
+        assert_eq!(
+            kind_from_suffix("scip-python python testpkg 1.0 `pkg.util`/Greeter#", false),
+            SyntaxKind::IdentifierType
+        );
+        assert_eq!(
+            kind_from_suffix("scip-python python testpkg 1.0 `pkg.util`/helper().", false),
+            SyntaxKind::IdentifierFunction
+        );
+        // A project package named "builtins" must not be mistaken for the
+        // real one: the package field, not the module name, decides.
+        assert_eq!(
+            kind_from_suffix("scip-python python testpkg 1.0 builtins/Thing#", false),
+            SyntaxKind::IdentifierType
+        );
+        // Other stdlib modules are not builtins.
+        assert_eq!(
+            kind_from_suffix("scip-python python posixpath unknown posixpath/sep.", false),
+            SyntaxKind::IdentifierMutableGlobal
+        );
+    }
 }

@@ -88,6 +88,38 @@ fn documents_present() {
 }
 
 #[test]
+fn shebang_scripts_are_discovered() {
+    let index = index_fixture("shebang");
+    let mut paths: Vec<_> = index
+        .documents
+        .iter()
+        .map(|d| d.relative_path.as_str())
+        .collect();
+    paths.sort();
+    // `tool` has a Python shebang and no extension; `notpython` is a shell
+    // script and must be left out.
+    assert_eq!(paths, vec!["helper.py", "tool"]);
+}
+
+#[test]
+fn shebang_script_references_resolve() {
+    let index = index_fixture("shebang");
+    let tool = doc(&index, "tool");
+    // The script gets a module symbol named after the file, without an
+    // extension to strip.
+    assert_eq!(
+        occurrences(tool, "scip-python python testpkg 1.0 tool/"),
+        vec![(vec![0, 0, 0], DEF)]
+    );
+    // Its import resolves to the definition in helper.py at both the import
+    // and the call site, so the file was really parsed and not merely listed.
+    assert_eq!(
+        occurrences(tool, "scip-python python testpkg 1.0 helper/greet()."),
+        vec![(vec![3, 19, 24], 0), (vec![7, 10, 15], 0)]
+    );
+}
+
+#[test]
 fn definitions_in_module() {
     let index = index_fixture("simple");
     let util = doc(&index, "pkg/util.py");
@@ -388,7 +420,9 @@ fn highlights_fstring_parts() {
             (".", PunctuationDelimiter),
             ("path", IdentifierMutableGlobal),
             (".", PunctuationDelimiter),
-            ("sep", Identifier),
+            // Resolves into posixpath, so it is a global rather than an
+            // unresolved plain identifier.
+            ("sep", IdentifierMutableGlobal),
             ("!", IdentifierOperator),
             ("r", Identifier),
             ("}", PunctuationBracket),

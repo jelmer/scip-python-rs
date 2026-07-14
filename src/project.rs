@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -213,6 +215,55 @@ impl ParsedModule {
 
 const SKIP_DIRS: &[&str] = &["__pycache__", "venv", "node_modules", "build", "dist"];
 
+/// Whether a `#!` line names a Python interpreter. The interpreter is the
+/// last path component of the first word, or of the second word when the
+/// first is `env`; it counts as Python when it is `python` or `pypy` with an
+/// optional version suffix (`python3`, `python3.12`).
+fn shebang_is_python(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("#!") else {
+        return false;
+    };
+    let mut words = rest.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let interpreter = match Path::new(first).file_name().and_then(|n| n.to_str()) {
+        // `#!/usr/bin/env python3`, possibly with env's own options
+        // (`env -S python3 -u`), which we skip past to the first word that
+        // is not a flag.
+        Some("env") => {
+            let Some(word) = words.find(|w| !w.starts_with('-')) else {
+                return false;
+            };
+            match Path::new(word).file_name().and_then(|n| n.to_str()) {
+                Some(name) => name,
+                None => return false,
+            }
+        }
+        Some(name) => name,
+        None => return false,
+    };
+    let version = interpreter
+        .strip_prefix("python")
+        .or_else(|| interpreter.strip_prefix("pypy"));
+    version.is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// Read the first line of `path` and report whether it is a Python shebang.
+/// Unreadable and non-UTF-8 files simply do not match.
+fn has_python_shebang(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut line = String::new();
+    // Cap the read so a binary blob without newlines is not slurped whole.
+    match BufReader::new(file.take(256)).read_line(&mut line) {
+        Ok(_) => shebang_is_python(&line),
+        // Invalid UTF-8 in the first bytes: not a text file, so not Python.
+        Err(_) => false,
+    }
+}
+
 fn discover_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = vec![];
     let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
@@ -233,6 +284,13 @@ fn discover_files(root: &Path) -> Result<Vec<PathBuf>> {
         let path = entry.path();
         match path.extension().and_then(|e| e.to_str()) {
             Some("py") | Some("pyi") => {
+                files.push(path.strip_prefix(root)?.to_path_buf());
+            }
+            // Scripts are commonly extension-less and identify themselves
+            // with a shebang. Files carrying some other extension are left
+            // alone rather than sniffed, so that indexing a project does not
+            // mean opening every asset in it.
+            None if has_python_shebang(path) => {
                 files.push(path.strip_prefix(root)?.to_path_buf());
             }
             _ => {}
@@ -621,6 +679,35 @@ mod tests {
             module_name(Path::new("foo/bar.pyi")),
             ("foo.bar".into(), false)
         );
+    }
+
+    #[test]
+    fn python_shebangs() {
+        assert!(shebang_is_python("#!/usr/bin/python"));
+        assert!(shebang_is_python("#!/usr/bin/python3"));
+        assert!(shebang_is_python("#!/usr/local/bin/python3.12"));
+        assert!(shebang_is_python("#!/usr/bin/env python"));
+        assert!(shebang_is_python("#!/usr/bin/env python3"));
+        assert!(shebang_is_python("#!/usr/bin/env python3.13\n"));
+        assert!(shebang_is_python("#!/usr/bin/env pypy3"));
+        assert!(shebang_is_python("#!/usr/bin/python3 -u"));
+        assert!(shebang_is_python("#!/usr/bin/env -S python3 -u"));
+        assert!(shebang_is_python("#! /usr/bin/env python3"));
+    }
+
+    #[test]
+    fn non_python_shebangs() {
+        assert!(!shebang_is_python("#!/bin/sh"));
+        assert!(!shebang_is_python("#!/usr/bin/env bash"));
+        assert!(!shebang_is_python("#!/usr/bin/env ruby"));
+        assert!(!shebang_is_python("#!/usr/bin/env pythonista"));
+        assert!(!shebang_is_python("#!/usr/bin/pythonx"));
+        assert!(!shebang_is_python("#!/usr/bin/env"));
+        assert!(!shebang_is_python("#!"));
+        // Not a shebang at all.
+        assert!(!shebang_is_python("import os"));
+        assert!(!shebang_is_python("# !/usr/bin/env python3"));
+        assert!(!shebang_is_python(""));
     }
 
     #[test]
